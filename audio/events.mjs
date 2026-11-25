@@ -1,0 +1,24 @@
+// node audio/events.mjs [--quiet]   reads shots/*.py as text, evaluates every EVENTS literal (no python, no imports) + film.py, writes out/events.json
+import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url';
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..'), P = (...a) => path.join(ROOT, ...a);
+export function film() { const s = fs.readFileSync(P('film.py'), 'utf8'), out = {}; let t = 0; for (const m of s.matchAll(/\('([a-g]\d+)',\s*(\d+)\)/g)) { out[m[1]] = [t, +m[2]]; t += +m[2]; } if (t !== 2544) throw new Error('film.py is ' + t + ' frames'); return out; }
+// python literal -> JS value: numbers (with + - * / of literals), strings, lists, tuples, dict(), {}, True/False/None
+function parse(src, i0) {
+  let i = i0; const ws = () => { for (;;) { while (/\s/.test(src[i] ?? '')) i++; if (src[i] === '#') while (src[i] && src[i] !== '\n') i++; else if (src[i] === '\\' && src[i + 1] === '\n') i += 2; else return; } };
+  const str = () => { const pre = src[i] === 'f' || src[i] === 'r' || src[i] === 'b' ? src[i++] : ''; const q = src.startsWith('"""', i) || src.startsWith("'''", i) ? src.slice(i, i + 3) : src[i]; i += q.length; let s = ''; while (i < src.length && !src.startsWith(q, i)) { if (src[i] === '\\') { s += src[i + 1]; i += 2; } else s += src[i++]; } i += q.length; return pre === 'f' ? s.replace(/\{[^}]*\}/g, '?') : s; };
+  const seq = (end) => { const a = []; i++; for (;;) { ws(); if (src[i] === end) { i++; return a; } if (src[i] === ',') { i++; continue; } const st = i; try { a.push(expr()); ws(); if (src[i] !== ',' && src[i] !== end) throw new Error('dyn'); } catch { i = skip(st); a.push(undefined); } } };
+  const skip = st => { let d = 0, j = st; while (j < src.length) { const c = src[j]; if (c === '"' || c === "'") { i = j; str(); j = i; continue; } if ('([{'.includes(c)) d++; if (')]}'.includes(c)) { if (d === 0) return j; d--; } if (c === ',' && d === 0) return j; j++; } return j; };
+  const obj = () => { const o = {}; i++; for (;;) { ws(); if (src[i] === '}') { i++; return o; } if (src[i] === ',') { i++; continue; } const k = expr(); ws(); if (src[i] !== ':') throw new Error('dict'); i++; o[k] = expr(); } };
+  const dict = () => { const o = {}; i++; for (;;) { ws(); if (src[i] === ')') { i++; return o; } if (src[i] === ',') { i++; continue; } const m = /^[A-Za-z_]\w*/.exec(src.slice(i, i + 60)); if (!m) throw new Error('dict'); i += m[0].length; ws(); if (src[i] !== '=') throw new Error('dict='); i++; ws(); const st = i; try { o[m[0]] = expr(); ws(); if (src[i] !== ',' && src[i] !== ')') throw 0; } catch { i = skip(st); } } };
+  const atom = () => { ws(); const c = src[i]; if (c === '"' || c === "'" || ((c === 'f' || c === 'r') && /["']/.test(src[i + 1]))) { let s = str(); for (;;) { ws(); if (src[i] === '"' || src[i] === "'") s += str(); else return s; } } if (c === '[') return seq(']'); if (c === '(') { const a = seq(')'); return a.length === 1 && src[i - 2] !== ',' ? a[0] : a; } if (c === '{') return obj(); if (src.startsWith('dict(', i)) { i += 4; return dict(); } const n = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?/.exec(src.slice(i, i + 40)); if (n) { i += n[0].length; return +n[0]; } for (const [w, v] of [['True', true], ['False', false], ['None', null]]) if (src.startsWith(w, i)) { i += w.length; return v; } throw new Error('dyn'); };
+  const expr = () => { let v = atom(); for (;;) { ws(); const c = src[i]; if (c === '+' || c === '-' || c === '*' || (c === '/' && typeof v === 'number')) { i += src[i + 1] === '/' ? 2 : 1; const w = atom(); if (Array.isArray(v) && c === '+') v = v.concat(w); else v = c === '+' ? v + w : c === '-' ? v - w : c === '*' ? v * w : v / w; } else return v; } };
+  const v = expr(); return [v, i];
+}
+export function collect(quiet = true) {
+  const F = film(), out = {}, rep = [];
+  for (const id of Object.keys(F)) { const p = P('shots', id + '.py'); if (!fs.existsSync(p)) { rep.push(id + ' no file'); continue; } const src = fs.readFileSync(p, 'utf8'), ev = []; let dyn = 0;
+    for (const m of src.matchAll(/(^|\n)[ \t]*(?:self\.)?EVENTS[ \t]*\+?=[ \t]*/g)) { const at = m.index + m[0].length; if (src[at] !== '[') { dyn++; continue; } try { const [v] = parse(src, at); for (const e of v) { if (Array.isArray(e) && typeof e[0] === 'number' && typeof e[1] === 'string') ev.push({ f: e[0], kind: e[1], ...(e[2] && typeof e[2] === 'object' ? e[2] : {}) }); else dyn++; } } catch (er) { dyn++; } }
+    ev.sort((a, b) => a.f - b.f); out[id] = ev; rep.push(`${id} ${ev.length}${dyn ? '+' + dyn + 'dyn' : ''}`); }
+  fs.mkdirSync(P('out'), { recursive: true }); fs.writeFileSync(P('out/events.json'), JSON.stringify(out)); if (!quiet) console.log(rep.join('  ')); return out;
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) collect(false);
